@@ -1,0 +1,7 @@
+{
+  "mode": "server",
+  "server_listen_addr": ":8080",
+  "secret_key": "abcdefghijklmnopqrstuvwxyz123456",
+  "auth_token": "mysecretproxytoken",
+  "log_debug": true
+}

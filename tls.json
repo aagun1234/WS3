@@ -1,0 +1,9 @@
+{
+  "mode": "server",
+  "server_listen_addr": ":8080,:8081,:8082",
+  "secret_key": "abcdefghijklmnopqrstuvwxyz123456",
+  "auth_token": "mysecretproxytoken",
+  "cert_file": "/home/wuw/192.168.199.211.crt",
+  "key_file": "/home/wuw/192.168.199.211.key",
+  "log_debug": true
+}
