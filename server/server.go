@@ -177,17 +177,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsConn := NewWebSocketConn(connID, conn, s.cfg)
 	log.Printf("[Server] New WebSocket connection from %s (ID: %d)", conn.RemoteAddr(), connID)
 	
-	found:=false
-	for _, ws := range s.sessionManager.wsConns {
-		if ws == wsConn {
-			found= true
-			break
-		}
-	}
-	if !found {
-		s.sessionManager.wsConns= append(s.sessionManager.wsConns, wsConn)
-		log.Printf("[Server] Adding WebSocket %d to sessionManager, total %d WebSockets", connID, len(s.sessionManager.wsConns))
-	}
+	// found:=false
+	// for _, ws := range s.sessionManager.wsConns {
+		// if ws == wsConn {
+			// found= true
+			// break
+		// }
+	// }
+	// if !found {
+		// s.sessionManager.wsConns= append(s.sessionManager.wsConns, wsConn)
+		// log.Printf("[Server] Adding WebSocket %d to sessionManager, total %d WebSockets", connID, len(s.sessionManager.wsConns))
+	// }
 	
 	defer func() {
 		if s.cfg.LogDebug>=2 {
@@ -339,22 +339,34 @@ func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
 
 // handleOpenSession establishes a connection to the target host.
 func (s *Server) handleOpenSession(wsConn *WebSocketConn, sessionID , startSeqID uint64, targetAddr string) bool {
-	// Server now dials directly to the targetAddr provided by the client.
+	
+	var targetConn net.Conn 
+	var err error
 	if s.cfg.LogDebug>=2 {
 		log.Printf("[Server] WebSocket %d: handleOpenSession start ", wsConn.ID)
 	}
-	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		log.Printf("[Server] [handleOpenSession] WebSocket %d: Failed to connect to client-requested target %s for session %d: %v", wsConn.ID, targetAddr, sessionID, err)
-		wsConn.WriteMessage(protocol.NewCloseSessionMessage(sessionID))
-		return false
-	}
+	sess, ok := s.sessionManager.LoadSession(sessionID)
+	
+	
+	if !ok {//如果是新建会话，说明需要向目标发起连接
+		// Server now dials directly to the targetAddr provided by the client.
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] WebSocket %d: Dial to %s ", wsConn.ID, targetAddr)
+		}
+		targetConn, err = net.DialTimeout("tcp", targetAddr, 10*time.Second)
+		if err != nil {
+			log.Printf("[Server] [handleOpenSession] WebSocket %d: Failed to connect to client-requested target %s for session %d: %v", wsConn.ID, targetAddr, sessionID, err)
+			wsConn.WriteMessage(protocol.NewCloseSessionMessage(sessionID))
+			return false
+		}
 
-	if s.cfg.LogDebug>=2 {
-		log.Printf("[Server] [handleOpenSession] WebSocket %d: Successfully connected to client-requested target %s for session %d.", wsConn.ID, targetAddr, sessionID)
-	}
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] [handleOpenSession] WebSocket %d: Successfully connected to client-requested target %s for session %d.", wsConn.ID, targetAddr, sessionID)
+		}
+	} 
+	
 	log.Printf("[Server] WebSocket %d: Init TargetSession.", wsConn.ID )
-	sess := NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn, s.cfg)
+	sess = NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn, s.cfg)
 	if sess!=nil {
 		sess.nextSequenceID=startSeqID
 		sess.sendSequenceID=startSeqID

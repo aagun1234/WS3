@@ -45,7 +45,7 @@ func NewTargetSession(sessionID, maxping uint64, wsConn *WebSocketConn, manager 
 			return nil
 		}
 		if cfg.LogDebug>=2 {
-			log.Printf("[Server] TargetSession %d exists,  adding WS to TargetSession.wsConns.",  sessionID, len(ts.wsConns))
+			log.Printf("[Server] TargetSession %d exists,  adding WS to TargetSession.wsConns.",  sessionID)
 		}
 		found:=false
 		ts.mu.Lock()
@@ -53,7 +53,7 @@ func NewTargetSession(sessionID, maxping uint64, wsConn *WebSocketConn, manager 
 			if ws == wsConn {
 				found= true
 				if cfg.LogDebug>=2 {
-					log.Printf("[Server] WebSocket %d already in TargetSession.wsConns, skip", wsConn.ID)			
+					log.Printf("[Server] WebSocket %d already in TargetSession.wsConns(%d), skip", wsConn.ID, len(ts.wsConns))			
 				}
 			}
 		}
@@ -249,10 +249,10 @@ func (ts *TargetSession) GetAvailableWS() *WebSocketConn {
 	var availableWSs []*WebSocketConn
 	totalWeight := float64(0)
 	if ts.cfg.LogDebug>=2 {
-		log.Printf("[GetAvailableWS] Session %d: Total WebSockers: %d", ts.SessionID, len(ts.manager.wsConns))
+		log.Printf("[GetAvailableWS] Session %d: Total WebSockers: %d", ts.SessionID, len(ts.wsConns))
 	}
 	// Filter connected and available tunnels and calculate total weight
-	for _, ws := range ts.manager.wsConns {
+	for _, ws := range ts.wsConns {
 		latency:= ws.Latency.Load()
 		lastping:=ws.LastPing.Load()
 		l1:=latency/ 1_000_000 //ms
@@ -276,7 +276,7 @@ func (ts *TargetSession) GetAvailableWS() *WebSocketConn {
 		}
 		availableWSs = append(availableWSs, ws)
 		if ts.cfg.LogDebug>=2 {
-			log.Printf("[GetAvailableWS] Session %d: Adding Available WebSocket %d, total ws: %d, total weight: %d", ts.SessionID, ws.ID, len(availableWSs), totalWeight)
+			log.Printf("[GetAvailableWS] Session %d: Adding Available WebSocket %d, total ws: %d, total weight: %v", ts.SessionID, ws.ID, len(availableWSs), totalWeight)
 		}
 		totalWeight += weight
 		 
@@ -334,15 +334,15 @@ func (ts *TargetSession) Close() {
 		}
 
 		// Send close message back to client via WebSocket (if WS connection is still healthy)
-		if len(ts.manager.wsConns)>0 {
-			for _ , wsConn :=range ts.manager.wsConns {
+		if len(ts.wsConns)>0 {
+			for _ , wsConn :=range ts.wsConns {
 				if wsConn!= nil && wsConn.IsConnected() { // Ensure WebSocket is still healthy before writing
 					if err := wsConn.WriteMessage(protocol.NewCloseSessionMessage(ts.SessionID)); err != nil {
 						log.Printf("[Server Session %d] Error sending close message back to client: %v", ts.SessionID, err)
 					} else {
 						break
 					}
-				}
+				} 
 			}
 		}
 	})
@@ -351,7 +351,7 @@ func (ts *TargetSession) Close() {
 // SessionManager manages active target sessions on the server side.
 type SessionManager struct {
 	sessions *sync.Map // map[uint64]*TargetSession
-	wsConns    []*WebSocketConn 
+	//wsConns    []*WebSocketConn 
 }
 
 // NewSessionManager creates a new SessionManager.
@@ -390,18 +390,18 @@ func (sm *SessionManager) CloseAllSessionsForWebSocket(wsConn *WebSocketConn) {
 			return false
 		}
 		
-		if len(sess.manager.wsConns) ==0 {
+		if len(sess.wsConns) ==0 {
 			log.Printf("[Server Session %d] Closing session due to no websocket.", sessionID)
 			sess.Close() 
-		} else if len(sess.manager.wsConns) ==1 {
-			if sess.manager.wsConns[0]==wsConn {
+		} else if len(sess.wsConns) ==1 {
+			if sess.wsConns[0]==wsConn {
 				log.Printf("[Server Session %d] Closing session due to WebSocket disconnection.", sessionID)
 				sess.Close() 
 			}
 		} else {
-			for i, conn := range sess.manager.wsConns {
+			for i, conn := range sess.wsConns {
 				if conn == wsConn {
-					sess.manager.wsConns[i] = sess.manager.wsConns[len(sess.manager.wsConns)-1]
+					sess.wsConns[i] = sess.wsConns[len(sess.wsConns)-1]
 					log.Printf("[Server Session %d] Other websockets in this session, session will not close.", sessionID)
 					break
 				}
@@ -417,7 +417,7 @@ func (sm *SessionManager) CloseAllSessionsForWebSocket1(wsConn *WebSocketConn) {
 	sm.sessions.Range(func(key, value interface{}) bool {
 		sessionID := key.(uint64)
 		sess := value.(*TargetSession)
-		if len(sess.manager.wsConns)>0 {
+		if len(sess.wsConns)>0 {
 			log.Printf("[Server Session %d] Closing session due to WebSocket disconnection.", sessionID)
 			sess.Close() // This will also delete it from the map
 		}
