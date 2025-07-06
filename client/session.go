@@ -110,7 +110,7 @@ func (s *Session) StartMessage() {
 					if msg.SessionID==s.SessionID {
 						// 找到了期待的消息，可以处理了
 						if s.cfg.LogDebug>=2 {
-							log.Printf("[SessionProcess] [Session %d] Got data From buffer", s.SessionID)
+							log.Printf("[Client SessionProcess] [Session %d] Got data From buffer", s.SessionID)
 						}
 						delete(s.receiveBuffer, s.nextSequenceID) // 从缓冲区中移除
 						s.nextSequenceID++                       // 更新期待的下一条序列号
@@ -118,13 +118,13 @@ func (s *Session) StartMessage() {
 						
 						// 处理并转发消息
 						if _, err := s.clientConn.Write(msg.Payload); err != nil {
-							log.Printf("[SessionProcess] [Session %d] Error writing data to client connection: %v", s.SessionID, err)
+							log.Printf("[Client SessionProcess] [Session %d] Error writing data to client connection: %v", s.SessionID, err)
 							s.Close() // Close session if client write fails
 							return    // 退出处理循环
 						}
 						break // 跳出内层循环，继续处理下一条消息
 					} else {
-						log.Printf("[SessionProcess] [Session %d] SessionID MisMatch Error, %d != %d", s.SessionID, s.SessionID, msg.SessionID )
+						log.Printf("[Client SessionProcess] [Session %d] SessionID MisMatch Error, %d != %d", s.SessionID, s.SessionID, msg.SessionID )
 					}
 				} else {
 					// 如果缓冲区中没有期待的消息，则等待
@@ -168,9 +168,9 @@ func (s *Session) Start() {
 						continue // Timeout, recheck closed status
 					}
 					if err != io.EOF {
-						log.Printf("[Session %d] Error reading from client connection: %v", s.SessionID, err)
+						log.Printf("[Client Session %d] Error reading from client connection: %v", s.SessionID, err)
 					} else {
-						log.Printf("[Session %d] Client disconnected (EOF).", s.SessionID)
+						log.Printf("[Client Session %d] Client disconnected (EOF).", s.SessionID)
 					}
 					s.Close()
 					return
@@ -179,25 +179,25 @@ func (s *Session) Start() {
 				if n > 0 {
 					// Send data over tunnel
 					if s.cfg.LogDebug>=2 {
-						log.Printf("[Session %d] Going to send %d bytes to server, tunnels: %d", s.SessionID, n, len(s.tunnels))
+						log.Printf("[Client Session %d] Going to send %d bytes to server, tunnels: %d", s.SessionID, n, len(s.tunnels))
 					}
 					tunnel:=s.GetAvailableTunnel()
 					if tunnel!=nil {
 						if s.cfg.LogDebug>=2 {
-							log.Printf("[Session %d] select tunnel %d , Seq:%d", s.SessionID, tunnel.ID, s.sendSequenceID)
+							log.Printf("[Client Session %d] select tunnel %d , Seq:%d", s.SessionID, tunnel.ID, s.sendSequenceID)
 						}
 						if err := tunnel.WriteMessage(protocol.NewDataMessage(s.SessionID, s.sendSequenceID, buf[:n])); err != nil {
-							log.Printf("[Session %d] Error sending data over tunnel: %v", s.SessionID, err)
+							log.Printf("[Client Session %d] Error sending data over tunnel: %v", s.SessionID, err)
 							s.Close()
 							return
 						}
 						
 						s.sendSequenceID++
-						if s.cfg.LogDebug>=2 {
-							log.Printf("[Session %d] data sent, SendSeq++= %d", s.SessionID, s.sendSequenceID)
+						if s.cfg.LogDebug>=1 {
+							log.Printf("[Client Session %d] %d bytes from %s to %s, SendSeq++= %d", s.SessionID, n, s.clientConn.RemoteAddr(), tunnel.remoteAddr, s.sendSequenceID)
 						}
 					} else {
-						log.Printf("[Session %d] No available tunnel to send Message, Closing session", s.SessionID)
+						log.Printf("[Client Session %d] No available tunnel to send Message, Closing session", s.SessionID)
 						s.Close()
 						return
 					}

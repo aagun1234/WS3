@@ -278,11 +278,15 @@ func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
 					sess.mu.Lock()
 					sess.receiveBuffer[msg.SequenceID] = msg
 					sess.bufferCond.Signal() // 通知等待中的消费者有新消息到达
+					
 					sess.mu.Unlock()
 					
 					wsConn.LastPing.Store(time.Now().UnixNano())
 					if s.cfg.LogDebug>=2 {
 						log.Printf("[Server] WebSocket %d: DataMessage saved to Session Buffer, bufferLen: %d, LastPing %dms stored", wsConn.ID, len(sess.receiveBuffer),wsConn.LastPing.Load()/1_000_000)
+					}
+					if s.cfg.LogDebug>=1 {
+						log.Printf("[Server] WebSocket %d: %d bytes from %s to %s buffered, Sequence: %d", wsConn.ID, len(msg.Payload), wsConn.conn.RemoteAddr(), sess.targetConn.RemoteAddr(),msg.SequenceID)
 					}
 					
 					//这里不直接转发，等待会话协程处理缓冲区

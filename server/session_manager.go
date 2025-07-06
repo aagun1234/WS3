@@ -224,8 +224,8 @@ func (ts *TargetSession) Start() {
 							return
 						}
 						ts.sendSequenceID++
-						if ts.cfg.LogDebug>=2 {
-							log.Printf("[Server Session %d] %d bytesData Sent (Seq:%d)", ts.SessionID, n, ts.sendSequenceID)
+						if ts.cfg.LogDebug>=1 {
+							log.Printf("[Server Session %d] %d bytes from %s to %s, SendSeq++=%d", ts.SessionID, n, ts.targetConn.RemoteAddr(), wsConn.conn.RemoteAddr(), ts.sendSequenceID)
 						}
 					} else {
 						log.Printf("[Server Session %d] Error sending data (Seq:%d) NULL WebSocket: ", ts.SessionID, ts.sendSequenceID)

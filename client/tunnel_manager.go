@@ -413,6 +413,9 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 					sess.receiveBuffer[msg.SequenceID] = msg
 					sess.bufferCond.Signal() // 通知等待中的消费者有新消息到达
 					sess.mu.Unlock()
+					if tm.cfg.LogDebug>=1 {
+						log.Printf("[TunnelRead] [Tunnel %d] session %d: %d bytes from %s to , Sequence:%d, sending to %s.", t.ID,  msg.SessionID, len(msg.Payload), t.Conn.RemoteAddr(), sess.clientConn.RemoteAddr(), msg.SequenceID, )
+					}
 					//这里不直接转发，等待会话协程处理缓冲区
 					// if _, err := sess.clientConn.Write(msg.Payload); err != nil {
 						// log.Printf("[TunnelRead] [Tunnel %d] Error writing data to client connection %d: %v", t.ID, msg.SessionID, err)
