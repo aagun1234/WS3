@@ -353,7 +353,7 @@ func (s *Server) handleOpenSession(wsConn *WebSocketConn, sessionID , startSeqID
 	if s.cfg.LogDebug>=2 {
 		log.Printf("[Server] [handleOpenSession] WebSocket %d: Successfully connected to client-requested target %s for session %d.", wsConn.ID, targetAddr, sessionID)
 	}
-	log.Printf("[Server] WebSocket %d: Creating TargetSession.")
+	log.Printf("[Server] WebSocket %d: Creating TargetSession.", wsConn.ID )
 	sess := NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn, s.cfg)
 	if sess!=nil {
 		sess.nextSequenceID=startSeqID

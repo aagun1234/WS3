@@ -390,6 +390,7 @@ func (sm *SessionManager) CloseAllSessionsForWebSocket(wsConn *WebSocketConn) {
 		if sess==nil {
 			return false
 		}
+		
 		if len(sess.manager.wsConns) ==0 {
 			log.Printf("[Server Session %d] Closing session due to no websocket.", sessionID)
 			sess.Close() 

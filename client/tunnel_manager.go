@@ -414,7 +414,7 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 					sess.bufferCond.Signal() // 通知等待中的消费者有新消息到达
 					sess.mu.Unlock()
 					if tm.cfg.LogDebug>=1 {
-						log.Printf("[TunnelRead] [Tunnel %d] session %d: %d bytes from %s to , Sequence:%d, sending to %s.", t.ID,  msg.SessionID, len(msg.Payload), t.Conn.RemoteAddr(), sess.clientConn.RemoteAddr(), msg.SequenceID, )
+						log.Printf("[TunnelRead] [Tunnel %d] session %d: %d bytes from %s to %s , Sequence:%d", t.ID,  msg.SessionID, len(msg.Payload), t.Conn.RemoteAddr(), sess.clientConn.RemoteAddr(), msg.SequenceID)
 					}
 					//这里不直接转发，等待会话协程处理缓冲区
 					// if _, err := sess.clientConn.Write(msg.Payload); err != nil {
