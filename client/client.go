@@ -307,12 +307,12 @@ func (c *Client) handleTCPConnection(clientConn net.Conn) {
 		log.Printf("Handling new TCP connection from %s", clientConn.RemoteAddr())
 	}
 
-	tunnels := c.tunnelManager.tunnels
+//	tunnels := c.tunnelManager.tunnels
+	tunnels:=c.tunnelManager.GetAllAvailableTunnels()
 	if len(tunnels) <=0 {
 		log.Printf("No available tunnels for TCP request from %s to forward to %s", clientConn.RemoteAddr(), c.cfg.ForwardTarget)
 		return
 	}
-	log.Printf("%d Tunnels for TCP request ", len(tunnels))
 	
 	sessionID := c.tunnelManager.GetNextSessionID()
 	sess := NewSession(sessionID, clientConn, tunnels, c.sessions, c.cfg)
@@ -321,37 +321,53 @@ func (c *Client) handleTCPConnection(clientConn net.Conn) {
 		log.Printf("New session %d for TCP request from %s to forward to %s", sessionID, clientConn.RemoteAddr(), c.cfg.ForwardTarget)
 		
 	}
-	
-	tunnel:=c.tunnelManager.GetAvailableTunnel()
-	if tunnel == nil {
-		log.Printf("No available tunnels for TCP request from %s to forward to %s", clientConn.RemoteAddr(), c.cfg.ForwardTarget)
-		return
-	}
 
-	if c.cfg.LogDebug>=2 {
-		log.Printf("TCP client %s select tunnel %d to %s", clientConn.RemoteAddr(), tunnel.ID, c.cfg.ForwardTarget)
-	}
-
-	if c.cfg.LogDebug>=2 {
-		log.Printf("Sending OpenSessionMessage for session %d to %s", sessionID, c.cfg.ForwardTarget)
-	}
 	var replymsg *protocol.TunnelMessage
 	var err error
-	if replymsg,err = tunnel.WriteAndWait(protocol.NewOpenSessionMessage(sessionID, 1, c.cfg.ForwardTarget),sessionID,1,10); err != nil {
-		log.Printf("[Session %d] Failed to send OPEN_SESSION message for TCP target %s to tunnel %d: %v", sessionID, c.cfg.ForwardTarget, tunnel.ID, err)
-		sess.Close()
-		return
+	var succ bool
+	var lastseq,initseq uint64
+	succ = false
+	lastseq=0
+	initseq=1
+	for _, tunnel:=range tunnels {
+		if c.cfg.LogDebug>=2 {
+			log.Printf("[Session %d] Sending OpenSessionMessage for session %d to %s on tunnel %d", sessionID, sessionID, c.cfg.ForwardTarget,tunnel.ID)
+		}
+
+		if replymsg,err = tunnel.WriteAndWait(protocol.NewOpenSessionMessage(sessionID, initseq, c.cfg.ForwardTarget),sessionID,initseq,10); err != nil {
+			log.Printf("[Session %d] Failed to send OPEN_SESSION message for TCP target %s to tunnel %d: %v", sessionID, c.cfg.ForwardTarget, tunnel.ID, err)
+			tunnel.available.Store(false)
+			continue
+		}
+		if c.cfg.ForwardTarget!= string(replymsg.Payload) {
+			log.Printf("[Session %d] OPEN_SESSION ACK message received on tunnel %d, but target not match", sessionID, tunnel.ID)
+			tunnel.available.Store(false)
+			continue
+		}
+		
+		if lastseq==0 {
+			lastseq=replymsg.SequenceID 
+		}
+		
+		if initseq==replymsg.SequenceID && lastseq==replymsg.SequenceID {
+			succ=true
+			if c.cfg.LogDebug>=2 {
+				log.Printf("[Session %d] OPEN_SESSION_ACK received on tunnel %d, OK", sessionID,tunnel.ID)
+			}
+		}
+		
 	}
-	if c.cfg.ForwardTarget!= string(replymsg.Payload) {
-		log.Printf("[Session %d] OPEN_SESSION ACK message received on tunnel %d, but target not match", sessionID, tunnel.ID)
+	
+	if succ { //at least 1 success
+		if c.cfg.LogDebug>=2 {
+			log.Printf("[Session %d] TCP connection initiated forwarding to %s ", sessionID, c.cfg.ForwardTarget,)
+		}
+	} else {
+		log.Printf("[Session %d] failed on ALL WebSockets, session to %s Closing...", sessionID,  c.cfg.ForwardTarget)
 		sess.Close()
 		return
 	}
 
-	
-	if c.cfg.LogDebug>=2 {
-		log.Printf("[Session %d] OPEN_SESSION_ACK received, TCP connection from %s initiated forwarding to %s over tunnel %d.", sessionID, clientConn.RemoteAddr(), c.cfg.ForwardTarget, tunnel.ID)
-	}
 	
 	sess.nextSequenceID=replymsg.SequenceID+1
 	sess.sendSequenceID=replymsg.SequenceID+1

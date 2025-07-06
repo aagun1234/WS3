@@ -8,6 +8,6 @@
   "auth_token": "mysecretproxytoken",
   "tunnel_count": 4,
   "ping_interval": 30,
-  "log_debug": 1,
+  "log_debug": 3,
   "insecure_skip_verify": true
 }

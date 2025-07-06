@@ -20,7 +20,7 @@ type TargetSession struct {
 	nextSequenceID uint64
 	sendSequenceID uint64
 	cfg  *config.Config
-	//wsConns    []*WebSocketConn // Reference back to the specific WebSocket connection
+	wsConns    []*WebSocketConn // Reference back to the specific WebSocket connection
 	//latency    map[*WebSocketConn]*atomic.Int64
 	//lastPing   map[*WebSocketConn]*atomic.Int64
 	maxping    uint64
@@ -37,76 +37,75 @@ type TargetSession struct {
 // NewTargetSession creates a new TargetSession.
 func NewTargetSession(sessionID, maxping uint64, wsConn *WebSocketConn, manager *SessionManager, targetConn net.Conn, cfg *config.Config) *TargetSession {
 	var wsConns []*WebSocketConn
-	var tsess *TargetSession
-	tsess, ok := manager.LoadSession(sessionID)
+	var ts *TargetSession
+	ts, ok := manager.LoadSession(sessionID)
 	if ok {
-		if tsess == nil {
+		if ts == nil {
 			log.Printf("[Server] LoadSession failed, got NIL.")
 			return nil
 		}
 		if cfg.LogDebug>=2 {
-			log.Printf("[Server] TargetSession %d exists,  adding WS to wsConns(%d).",  sessionID, len(tsess.manager.wsConns))
+			log.Printf("[Server] TargetSession %d exists,  adding WS to TargetSession.wsConns.",  sessionID, len(ts.wsConns))
 		}
 		found:=false
-		if cfg.LogDebug>=2 {
-			log.Printf("[Server] sessionManager: %d", len(tsess.manager.wsConns))
-		}
-		for _, ws := range tsess.manager.wsConns {
+		ts.mu.Lock()
+		for _, ws := range ts.wsConns {
 			if ws == wsConn {
 				found= true
 				if cfg.LogDebug>=2 {
-					log.Printf("[Server] WebSocket %d already in sessionManager, skip", wsConn.ID)			
+					log.Printf("[Server] WebSocket %d already in TargetSession.wsConns, skip", wsConn.ID)			
 				}
 			}
 		}
 		if !found {
-			tsess.manager.wsConns=append(tsess.manager.wsConns, wsConn)	
+			ts.wsConns=append(ts.wsConns, wsConn)	
 			if cfg.LogDebug>=2 {
-				log.Printf("[Server] Adding WebSocket %d to sessionManager, %d", wsConn.ID, len(tsess.manager.wsConns))
+				log.Printf("[Server] Adding WebSocket %d to TargetSession.wsConns, total %d WebSockets", wsConn.ID, len(ts.wsConns))
 			}
-		}
-
-	
-		return tsess
+		}	
+		ts.mu.Unlock()
+		return ts
 	} else {
 		if cfg.LogDebug>=2 {
 			log.Printf("[Server] TargetSession %d not exists,  create new.",  sessionID)
 		}
-		wsConns=append(wsConns, wsConn)
-		tsess := &TargetSession{
+
+		ts = &TargetSession{
 			SessionID:  sessionID,
 			maxping:   maxping,
-			//wsConns:    wsConns,
+			wsConns:    wsConns,
 			targetConn: targetConn,
 			manager:   manager,
 			closed:    make(chan struct{}),
 			cfg:	cfg,
 			receiveBuffer: make(map[uint64]*protocol.TunnelMessage),
 		}
-		tsess.sendSequenceID=0
+		ts.sendSequenceID=0
 		found:=false
 		if cfg.LogDebug>=2 {
-			log.Printf("[Server] sessionManager: %d", len(tsess.manager.wsConns))
+			log.Printf("[Server] TargetSession.wsConns: %d", len(ts.wsConns))
 		}
-		for _, ws := range tsess.manager.wsConns {
+		ts.mu.Lock()
+		for _, ws := range ts.wsConns {
 			if ws == wsConn {
 				found= true
 				if cfg.LogDebug>=2 {
-					log.Printf("[Server] WebSocket %d already in sessionManager, skip", wsConn.ID)
+					log.Printf("[Server] WebSocket %d already in TargetSession.wsConns, skip", wsConn.ID)
 				}
 			}
 		}
 		if !found {
-			tsess.manager.wsConns=append(tsess.manager.wsConns, wsConn)	
+			ts.wsConns=append(ts.wsConns, wsConn)	
 			if cfg.LogDebug>=2 {
-				log.Printf("[Server] Adding WebSocket %d to sessionManager, %d", wsConn.ID, len(tsess.manager.wsConns))
+				log.Printf("[Server] Adding WebSocket %d to TargetSession.wsConns, %d", wsConn.ID, len(ts.wsConns))
 			}
 		}
-		tsess.bufferCond = sync.NewCond(&tsess.mu) // 使用 session 的 RWMutex 作为 Cond 的 Locker
+		ts.mu.Unlock()
+		ts.bufferCond = sync.NewCond(&ts.mu) // 使用 session 的 RWMutex 作为 Cond 的 Locker
 		if cfg.LogDebug>=2 {
-			log.Printf("[Server] TargetSession %d ,  adding WS to wsConns(%d).", tsess.SessionID,len(tsess.manager.wsConns))
+			log.Printf("[Server] TargetSession %d ,  adding WS to wsConns(%d).", ts.SessionID,len(ts.wsConns))
 		}
-		return tsess
+		return ts
 	} 
 	return nil
 }

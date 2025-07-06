@@ -572,6 +572,32 @@ func (tm *TunnelManager) GetAvailableTunnel() *Tunnel {
 	return nil
 }
 
+// GetAvailableTunnel selects a tunnel based on weighted random selection by latency.
+func (tm *TunnelManager) GetAllAvailableTunnels() []*Tunnel {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	var availableTunnels []*Tunnel
+
+
+	// Filter connected and available tunnels and calculate total weight
+	for _, t := range tm.tunnels {
+		if t.IsConnected() { // This now checks connected, available, and heartbeat
+			
+			availableTunnels = append(availableTunnels, t)
+
+		} else if tm.cfg.LogDebug>=2 {
+			log.Printf("[Tunnel %d] Not available: connected=%t, available=%t, latency=%d, lastHeartbeat=%v, nextReconnect=%v",
+				t.ID, t.connected, t.available.Load(), t.Latency(),
+				time.Unix(0, t.lastHeartbeat.Load()), time.Unix(0, t.nextReconnectTime.Load()))
+		}
+	}
+
+	return availableTunnels
+	
+	
+}
+
 // Shutdown gracefully shuts down all tunnels.
 func (tm *TunnelManager) Shutdown() {
 	log.Println("Shutting down TunnelManager...")
