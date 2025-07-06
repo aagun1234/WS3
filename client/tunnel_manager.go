@@ -40,6 +40,9 @@ type Tunnel struct {
 	reconnectAttempts atomic.Int32 // Consecutive failed connection attempts
 	nextReconnectTime atomic.Int64 // UnixNano of when the next reconnect attempt is allowed
 	cancel            context.CancelFunc // Context cancel for goroutines associated with this tunnel
+	OpenACKs 	      map[uint64]chan protocol.TunnelMessage
+	OpenACKMutex      sync.Mutex      // 待处理请求锁
+	
 }
 
 // Latency returns the current average latency of the tunnel in milliseconds.
@@ -58,6 +61,32 @@ func (t *Tunnel) IsConnected() bool {
 	}
 	// Also check for recent heartbeat to ensure liveness
 	return time.Now().UnixNano()-t.lastHeartbeat.Load() < int64(t.config.PingInterval*3)*int64(time.Second)
+}
+
+
+func (t *Tunnel) WriteAndWait(msg *protocol.TunnelMessage, sessionID, sequenceID uint64, timeout int) (*protocol.TunnelMessage, error) {
+
+	ch := make(chan protocol.TunnelMessage, 1)
+	t.OpenACKMutex.Lock()
+	t.OpenACKs[sessionID<<32|sequenceID] = ch
+	t.OpenACKMutex.Unlock()
+	
+	defer func() {
+		t.OpenACKMutex.Lock()
+		delete(t.OpenACKs, sessionID<<32|sequenceID)
+		t.OpenACKMutex.Unlock()
+	}()
+	
+	if err := t.WriteMessage(msg); err != nil {
+		return nil, err
+	}
+		
+	select {
+	case resp := <-ch:
+		return &resp, nil
+	case  <-time.After(time.Duration(timeout) * time.Second):
+		return nil, fmt.Errorf("Wait for Reply Timeout")
+	}
 }
 
 // WriteMessage encrypts and sends a TunnelMessage over the WebSocket.
@@ -169,6 +198,7 @@ func NewTunnelManager(cfg *config.Config, sessions *sync.Map) *TunnelManager {
 			closeChan: make(chan struct{}),
 			config:    cfg,
 			cancel:    tunnelCancel,
+			OpenACKs:  make(map[uint64]chan protocol.TunnelMessage),
 		}
 		t.latency.Store(math.MaxInt64) // Initialize with max latency
 		t.lastHeartbeat.Store(0)
@@ -176,7 +206,7 @@ func NewTunnelManager(cfg *config.Config, sessions *sync.Map) *TunnelManager {
 		t.reconnectAttempts.Store(0)
 		t.nextReconnectTime.Store(0)
 		tm.tunnels[i] = t
-		if tm.cfg.LogDebug {
+		if tm.cfg.LogDebug>=2 {
 			log.Printf("[NewTunnelManager] [Tunnel %d] Tunnel add .", t.ID)
 		}
 		go tm.connectAndMonitorTunnel(tunnelCtx, t)
@@ -187,7 +217,7 @@ func NewTunnelManager(cfg *config.Config, sessions *sync.Map) *TunnelManager {
 // connectAndMonitorTunnel attempts to connect a tunnel and keeps it alive, with exponential backoff.
 func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel) {
 	defer func() {
-		if tm.cfg.LogDebug {
+		if tm.cfg.LogDebug>=2 {
 			log.Printf("[Monitor] [Tunnel %d] Monitoring routine exited.", t.ID)
 		}
 		t.cancel() // Ensure this tunnel's context is cancelled
@@ -200,13 +230,13 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 		t.available.Store(false)
 		t.mu.Unlock()
 	}()
-	if tm.cfg.LogDebug {
+	if tm.cfg.LogDebug>=2 {
 		log.Printf("[Monitor] [Tunnel %d] Monitoring routine Started.", t.ID)
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			if tm.cfg.LogDebug {
+			if tm.cfg.LogDebug>=2 {
 				log.Printf("[Monitor] [Tunnel %d] Context cancelled, shutting down tunnel routine.", t.ID)
 			}
 			return
@@ -218,7 +248,7 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 		if !t.available.Load() && t.nextReconnectTime.Load() > 0 && time.Now().UnixNano() < t.nextReconnectTime.Load() {
 			delay := time.Unix(0, t.nextReconnectTime.Load()).Sub(time.Now())
 			if delay > 0 {
-				if tm.cfg.LogDebug {
+				if tm.cfg.LogDebug>=2 {
 					log.Printf("[Monitor] [Tunnel %d] In backoff. Next attempt in %s.", t.ID, delay.Round(time.Second))
 				}
 				time.Sleep(delay) // Wait until next reconnect time
@@ -228,7 +258,7 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 
 		// If not connected or not available (after backoff), attempt connection
 		if !t.connected || t.Conn == nil || !t.available.Load() {
-			if tm.cfg.LogDebug {
+			if tm.cfg.LogDebug>=2 {
 				log.Printf("[Monitor] [Tunnel %d] Attempting to connect to %s (attempt #%d)...", t.ID, t.remoteAddr, t.reconnectAttempts.Load()+1)
 			}
 			requestHeader := http.Header{}
@@ -238,7 +268,7 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 			t.mu.Lock()
 			
 			if t.Conn != nil { // Close old connection if any
-				if tm.cfg.LogDebug { 
+				if tm.cfg.LogDebug>=2 { 
 					log.Printf("[Monitor] [Tunnel %d] Closing old Conn...", t.ID )
 				}
 				t.Conn.Close()
@@ -270,14 +300,14 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 			t.reconnectAttempts.Store(0) // Reset attempts on successful connection
 			t.available.Store(true)      // Mark available
 			t.nextReconnectTime.Store(0) // Reset next reconnect time
-			if tm.cfg.LogDebug {
+			if tm.cfg.LogDebug>=2 {
 				log.Printf("[Monitor] [Tunnel %d] Connected to %s, %v", t.ID, t.remoteAddr,t.connected)
 			}
 			// Start read and ping handlers for the newly connected tunnel
 			
 			go tm.handleTunnelRead(ctx, t)
 			go tm.handleTunnelPing(ctx, t)
-			if tm.cfg.LogDebug {
+			if tm.cfg.LogDebug>=3 {
 				log.Printf("[Monitor] [Tunnel %d] Sending first Ping %s, %v", t.ID, t.remoteAddr,t.connected)
 			}
 			if err := t.WriteMessage(protocol.NewPingMessage(time.Now().UnixNano())); err != nil {
@@ -293,7 +323,7 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 		case <-time.After(time.Second): // Periodically check connection status
 			if !t.IsConnected() { // This checks for heartbeat validity and general connection health
 				log.Printf("[Monitor] [Tunnel %d] Connection seemed unhealthy or broken. Initiating reconnect cycle...", t.ID)
-				if tm.cfg.LogDebug {
+				if tm.cfg.LogDebug>=2 {
 					log.Printf("[Tunnel %d] connected %v, Conn %v, Available %v \n", t.ID, t.connected,(t.Conn!=nil),t.available.Load())
 				}
 				t.mu.Lock()
@@ -312,7 +342,7 @@ func (tm *TunnelManager) connectAndMonitorTunnel(ctx context.Context, t *Tunnel)
 // handleTunnelRead handles incoming messages from a WebSocket tunnel.
 func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 	defer func() {
-		if tm.cfg.LogDebug {
+		if tm.cfg.LogDebug>=2 {
 			log.Printf("[TunnelRead] [Tunnel %d] Read handler exited. Marking tunnel as disconnected/unavailable.", t.ID)
 		}
 		t.mu.Lock()
@@ -328,7 +358,7 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 			// sessionID := key.(uint64)
 			// sess := value.(*Session)
 			// if sess.tunnel == t {
-				// if tm.cfg.LogDebug {
+				// if tm.cfg.LogDebug>=2 {
 					// log.Printf("[TunnelRead] [Tunnel %d] Cleaning up session %d due to tunnel disconnection.", t.ID, sessionID)
 				// }
 				// sess.Close() // This will also remove it from tm.sessions
@@ -336,7 +366,7 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 			// return true
 		// })
 	}()
-	if tm.cfg.LogDebug {
+	if tm.cfg.LogDebug>=2 {
 		log.Printf("[TunnelRead] [Tunnel %d] Read handler Start", t.ID,)
 	}
 	for {
@@ -347,7 +377,7 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 			msg, err := t.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					if tm.cfg.LogDebug {
+					if tm.cfg.LogDebug>=2 {
 						log.Printf("[TunnelRead] [Tunnel %d] WebSocket closed normally: %v", t.ID, err)
 					}
 				} else {
@@ -356,25 +386,33 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 				return // Exit read loop on error
 			}
 
-			if tm.cfg.LogDebug {
-				log.Printf("[TunnelRead] [Tunnel %d] Received msg Type: %d, SessionID: %d, PayloadSize: %d",
-					t.ID, msg.Type, msg.SessionID, len(msg.Payload))
+			if tm.cfg.LogDebug>=3 {
+				log.Printf("[TunnelRead] [Tunnel %d] MessageType: %d, SessionID: %d, SquenceID: %d, PayloadLength: %d",
+					t.ID, msg.Type, msg.SessionID, msg.SequenceID, len(msg.Payload))
 			}
 
 			t.lastHeartbeat.Store(time.Now().UnixNano()) // Update heartbeat on any received message
 
 			switch msg.Type {
+			case protocol.MsgTypeOpenSession:
+				t.OpenACKMutex.Lock()
+				if ch, ok := t.OpenACKs[msg.SessionID<<32|msg.SequenceID]; ok {
+					ch <- *msg
+					delete(t.OpenACKs, msg.SessionID<<32|msg.SequenceID)
+				}
+				t.OpenACKMutex.Unlock()
+				
 			case protocol.MsgTypeData:
 				if val, ok := tm.sessions.Load(msg.SessionID); ok {
 					sess := val.(*Session)
-					if tm.cfg.LogDebug {
+					if tm.cfg.LogDebug>=2 {
 						log.Printf("[TunnelRead] [Tunnel %d] Received %d bytes data for session %d, Seq:%d, sending to %s.", t.ID, len(msg.Payload), msg.SessionID, msg.SequenceID, sess.clientConn.RemoteAddr())
 					}
 					// 将消息放入会话的接收缓冲区
-					sess.rxmu.Lock()
+					sess.mu.Lock()
 					sess.receiveBuffer[msg.SequenceID] = msg
 					sess.bufferCond.Signal() // 通知等待中的消费者有新消息到达
-					sess.rxmu.Unlock()
+					sess.mu.Unlock()
 					//这里不直接转发，等待会话协程处理缓冲区
 					// if _, err := sess.clientConn.Write(msg.Payload); err != nil {
 						// log.Printf("[TunnelRead] [Tunnel %d] Error writing data to client connection %d: %v", t.ID, msg.SessionID, err)
@@ -387,7 +425,7 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 				}
 			case protocol.MsgTypeCloseSession:
 				if val, ok := tm.sessions.Load(msg.SessionID); ok {
-					if tm.cfg.LogDebug {
+					if tm.cfg.LogDebug>=2 {
 						log.Printf("[TunnelRead] [Tunnel %d] Received close for session %d from server.", t.ID, msg.SessionID)
 					}
 					val.(*Session).Close() // This also removes it from tm.sessions
@@ -398,7 +436,9 @@ func (tm *TunnelManager) handleTunnelRead(ctx context.Context, t *Tunnel) {
 				if timestamp, err := protocol.GetPingTimestamp(msg); err == nil {
 					rtt := (time.Now().UnixNano() - timestamp)*7+t.latency.Load()*3
 					t.latency.Store(rtt/10)
-					log.Printf("[TunnelRead] [Tunnel %d] Ping-Pong RTT: %d ms", t.ID, rtt/10_000_000)
+					if tm.cfg.LogDebug>=3 {
+						log.Printf("[TunnelRead] [Tunnel %d] Ping-Pong RTT: %d ms", t.ID, rtt/10_000_000)
+					}
 					
 				} else {
 					log.Printf("[TunnelRead] [Tunnel %d] Invalid pong message: %v", t.ID, err)
@@ -415,7 +455,7 @@ func (tm *TunnelManager) handleTunnelPing(ctx context.Context, t *Tunnel) {
 	ticker := time.NewTicker(time.Duration(tm.cfg.PingInterval) * time.Second)
 	defer ticker.Stop()
 	
-	if tm.cfg.LogDebug {
+	if tm.cfg.LogDebug>=2 {
 		log.Printf("[TunnelPing] [Tunnel %d] Ping handler Started.", t.ID)
 	}
 	for {
@@ -432,7 +472,7 @@ func (tm *TunnelManager) handleTunnelPing(ctx context.Context, t *Tunnel) {
 				ticker = time.NewTicker(newInterval)  // 创建新的
 			
 				if t.IsConnected() { // Only ping if considered connected and available
-					if tm.cfg.LogDebug {
+					if tm.cfg.LogDebug>=4 {
 						log.Printf("[TunnelPing] [Tunnel %d] Sending Ping Message", t.ID)
 					}
 					if err := t.WriteMessage(protocol.NewPingMessage(time.Now().UnixNano())); err != nil {
@@ -445,13 +485,12 @@ func (tm *TunnelManager) handleTunnelPing(ctx context.Context, t *Tunnel) {
 						t.connected = false
 						t.mu.Unlock()
 						t.available.Store(false) // Mark unavailable to trigger reconnect logic
+						
 						return // Exit ping handler, connection is broken
 					}
 				
 				} else {
-					if tm.cfg.LogDebug {
-						log.Printf("[TunnelPing] [Tunnel %d] Not connected or available, stopping ping.", t.ID)
-					}
+					log.Printf("[TunnelPing] [Tunnel %d] Not connected or available, stopping ping.", t.ID)
 					return // Tunnel is not connected, stop pinging
 				}
 			} else {
@@ -461,7 +500,7 @@ func (tm *TunnelManager) handleTunnelPing(ctx context.Context, t *Tunnel) {
 			}
 		}
 	}
-	if tm.cfg.LogDebug { 
+	if tm.cfg.LogDebug>=2 { 
 		log.Printf("[TunnelPing] [Tunnel %d] Ping handler exited.", t.ID) 
 	}
 }
@@ -491,7 +530,7 @@ func (tm *TunnelManager) GetAvailableTunnel() *Tunnel {
 			}
 			availableTunnels = append(availableTunnels, t)
 			totalWeight += weight
-		} else if tm.cfg.LogDebug {
+		} else if tm.cfg.LogDebug>=2 {
 			log.Printf("[Tunnel %d] Not available: connected=%t, available=%t, latency=%d, lastHeartbeat=%v, nextReconnect=%v",
 				t.ID, t.connected, t.available.Load(), t.Latency(),
 				time.Unix(0, t.lastHeartbeat.Load()), time.Unix(0, t.nextReconnectTime.Load()))
@@ -513,7 +552,7 @@ func (tm *TunnelManager) GetAvailableTunnel() *Tunnel {
 			weight = 1.0 / float64(latencyMs)
 		}
 		if r < weight {
-			if tm.cfg.LogDebug {
+			if tm.cfg.LogDebug>=2 {
 				log.Printf("Selected tunnel %d (latency: %dms, weight: %.2f)", t.ID, latencyMs, weight)
 			}
 			return t

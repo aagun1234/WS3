@@ -59,7 +59,7 @@ type Config struct {
 	CertFile           string `json:"cert_file"`            // Path to TLS certificate file (server)
 	KeyFile            string `json:"key_file"`             // Path to TLS private key file (server)
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"` // Skip TLS certificate verification (client)
-	LogDebug           bool   `json:"log_debug"`            // Enable debug logging
+	LogDebug           int   `json:"log_debug"`            // Enable debug logging
 	
 }
 
@@ -85,7 +85,7 @@ func parseFlags(cfg *Config) string {
 		certFile           string
 		keyFile            string
 		insecureSkipVerify bool
-		logDebug           bool
+		logDebug           int
 		cfgfile            string
 	)
 
@@ -107,7 +107,7 @@ func parseFlags(cfg *Config) string {
 	flag.StringVar(&certFile, "cert-file", "", "Path to TLS certificate file")
 	flag.StringVar(&keyFile, "key-file", "", "Path to TLS private key file")
 	flag.BoolVar(&insecureSkipVerify, "insecure-skip-verify", false, "Skip TLS certificate verification")
-	flag.BoolVar(&logDebug, "log-debug", false, "Enable debug logging")
+	flag.IntVar(&logDebug, "log-debug", 0, "Enable debug logging")
 
 	// 自定义用法信息
 	flag.Usage = func() {
@@ -194,8 +194,10 @@ func LoadConfig() *Config {
 	if os.Getenv("INSECURE_SKIP_VERIFY") == "true" {
 		cfg.InsecureSkipVerify = true
 	}
-	if os.Getenv("LOG_DEBUG") == "true" {
-		cfg.LogDebug = true
+	if dbg1 := os.Getenv("LOG_DEBUG"); dbg1!="" {
+		if dbg, err := strconv.Atoi(dbg1); err == nil {
+			cfg.LogDebug = dbg
+		}
 	}
 
 	if tc := os.Getenv("TUNNEL_COUNT"); tc != "" {

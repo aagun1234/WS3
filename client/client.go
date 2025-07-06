@@ -98,7 +98,7 @@ func (c *Client) listenForSOCKS5Connections() {
 func (c *Client) handleSOCKS5Connection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("Handling new SOCKS5 connection from %s", clientConn.RemoteAddr())
 	}
 
@@ -199,7 +199,7 @@ func (c *Client) handleSOCKS5Connection(clientConn net.Conn) {
 		return
 	}
 
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("SOCKS5 client %s requests connection to %s", clientConn.RemoteAddr(), targetAddr)
 	}
 
@@ -211,7 +211,7 @@ func (c *Client) handleSOCKS5Connection(clientConn net.Conn) {
 	}
 
 	sessionID := c.tunnelManager.GetNextSessionID()
-	sess := NewSession(sessionID, clientConn, tunnels, c.sessions)
+	sess := NewSession(sessionID, clientConn, tunnels, c.sessions, c.cfg)
 	c.sessions.Store(sessionID, sess)
 	
 	tunnel:=c.tunnelManager.GetAvailableTunnel()
@@ -219,31 +219,46 @@ func (c *Client) handleSOCKS5Connection(clientConn net.Conn) {
 		log.Printf("No available tunnels for TCP request from %s to forward to %s", clientConn.RemoteAddr(), c.cfg.ForwardTarget)
 		return
 	}
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("SOCKS5 client %s select tunnel %d to %s", clientConn.RemoteAddr(), tunnel.ID, targetAddr)
 	}
 	
-	if err := tunnel.WriteMessage(protocol.NewOpenSessionMessage(sessionID, targetAddr)); err != nil {
-		log.Printf("[Session %d] Failed to send OPEN_SESSION message for SOCKS5 target %s to tunnel %d: %v", sessionID, targetAddr, tunnel.ID, err)
+
+
+	var replymsg *protocol.TunnelMessage
+
+	if replymsg, err = tunnel.WriteAndWait(protocol.NewOpenSessionMessage(sessionID, 1, c.cfg.ForwardTarget),sessionID,1,10); err != nil {
+		log.Printf("[Session %d] Failed to send OPEN_SESSION message for SOCKS5 Proxy target %s to tunnel %d: %v", sessionID, c.cfg.ForwardTarget, tunnel.ID, err)
+		clientConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+		sess.Close()
+		return
+	}
+	if c.cfg.ForwardTarget!= string(replymsg.Payload) {
+		log.Printf("[Session %d] OPEN_SESSION ACK message received on tunnel %d, but target not match", sessionID, tunnel.ID)
 		clientConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		sess.Close()
 		return
 	}
 
+	
 	// SOCKS5 success reply: VER=5, REP=0 (Success), RSV=0, BND.ADDR=0.0.0.0, BND.PORT=0
 	// We don't know the actual bound address/port on the server side, so use 0.0.0.0:0
-	if _, err := clientConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
+	if _, err = clientConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
 		log.Printf("[Session %d] Failed to send SOCKS5 success reply: %v", sessionID, err)
 		sess.Close()
 		return
 	}
 
-	log.Printf("[Session %d] SOCKS5 connection to %s established over tunnel %d. Data forwarding started.", sessionID, targetAddr, tunnel.ID)
+
+	if c.cfg.LogDebug>=2 {
+		log.Printf("[Session %d] SOCKS5 connection to %s established over tunnel %d. Data forwarding started.", sessionID, targetAddr, tunnel.ID)
+	}
 	
-	sess.nextSequenceID=1
-	sess.sendSequenceID=1
-	go sess.StartMessage()
-	sess.Start() // Start data forwarding
+	sess.nextSequenceID=replymsg.SequenceID+1
+	sess.sendSequenceID=replymsg.SequenceID+1
+	go sess.StartMessage()	
+	sess.Start()
+
 	log.Printf("[Session %d] SOCKS5 handling goroutine exited.", sessionID)
 }
 
@@ -254,13 +269,14 @@ func (c *Client) listenForTCPConnections() {
 			c.listener.Close()
 		}
 		c.tunnelManager.Shutdown()
-		if c.cfg.LogDebug {
+		if c.cfg.LogDebug>=2 {
 			log.Println("TCP listener goroutine exited.")
 		}
 	}()
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Println("TCP listener goroutine Started.")
 	}
+	
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -277,6 +293,7 @@ func (c *Client) listenForTCPConnections() {
 				log.Printf("Error accepting TCP connection: %v", err)
 				continue
 			}
+			log.Printf("TCP Connection from %s accepted .",conn.RemoteAddr())
 			go c.handleTCPConnection(conn)
 		}
 	}
@@ -286,7 +303,7 @@ func (c *Client) listenForTCPConnections() {
 func (c *Client) handleTCPConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("Handling new TCP connection from %s", clientConn.RemoteAddr())
 	}
 
@@ -295,13 +312,14 @@ func (c *Client) handleTCPConnection(clientConn net.Conn) {
 		log.Printf("No available tunnels for TCP request from %s to forward to %s", clientConn.RemoteAddr(), c.cfg.ForwardTarget)
 		return
 	}
-		
+	log.Printf("%d Tunnels for TCP request ", len(tunnels))
+	
 	sessionID := c.tunnelManager.GetNextSessionID()
-	sess := NewSession(sessionID, clientConn, tunnels, c.sessions)
+	sess := NewSession(sessionID, clientConn, tunnels, c.sessions, c.cfg)
 	c.sessions.Store(sessionID, sess)
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("New session %d for TCP request from %s to forward to %s", sessionID, clientConn.RemoteAddr(), c.cfg.ForwardTarget)
-		log.Printf("Sending OpenSessionMessage for session %d to %s", sessionID, c.cfg.ForwardTarget)
+		
 	}
 	
 	tunnel:=c.tunnelManager.GetAvailableTunnel()
@@ -310,27 +328,36 @@ func (c *Client) handleTCPConnection(clientConn net.Conn) {
 		return
 	}
 
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("TCP client %s select tunnel %d to %s", clientConn.RemoteAddr(), tunnel.ID, c.cfg.ForwardTarget)
 	}
 
-
-
-	if err := tunnel.WriteMessage(protocol.NewOpenSessionMessage(sessionID, c.cfg.ForwardTarget)); err != nil {
+	if c.cfg.LogDebug>=2 {
+		log.Printf("Sending OpenSessionMessage for session %d to %s", sessionID, c.cfg.ForwardTarget)
+	}
+	var replymsg *protocol.TunnelMessage
+	var err error
+	if replymsg,err = tunnel.WriteAndWait(protocol.NewOpenSessionMessage(sessionID, 1, c.cfg.ForwardTarget),sessionID,1,10); err != nil {
 		log.Printf("[Session %d] Failed to send OPEN_SESSION message for TCP target %s to tunnel %d: %v", sessionID, c.cfg.ForwardTarget, tunnel.ID, err)
 		sess.Close()
 		return
 	}
+	if c.cfg.ForwardTarget!= string(replymsg.Payload) {
+		log.Printf("[Session %d] OPEN_SESSION ACK message received on tunnel %d, but target not match", sessionID, tunnel.ID)
+		sess.Close()
+		return
+	}
 
-	if c.cfg.LogDebug {
-		log.Printf("[Session %d] TCP connection from %s initiated forwarding to %s over tunnel %d.", sessionID, clientConn.RemoteAddr(), c.cfg.ForwardTarget, tunnel.ID)
+	
+	if c.cfg.LogDebug>=2 {
+		log.Printf("[Session %d] OPEN_SESSION_ACK received, TCP connection from %s initiated forwarding to %s over tunnel %d.", sessionID, clientConn.RemoteAddr(), c.cfg.ForwardTarget, tunnel.ID)
 	}
 	
-	sess.nextSequenceID=1
-	sess.sendSequenceID=1
+	sess.nextSequenceID=replymsg.SequenceID+1
+	sess.sendSequenceID=replymsg.SequenceID+1
 	go sess.StartMessage()	
 	sess.Start()
-	if c.cfg.LogDebug {
+	if c.cfg.LogDebug>=2 {
 		log.Printf("[Session %d] TCP handling goroutine exited.", sessionID)
 	
 	}

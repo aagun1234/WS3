@@ -24,6 +24,9 @@ type WebSocketConn struct {
 	mu   sync.Mutex
 	cfg  *config.Config
 	connected bool
+	LastPing atomic.Int64
+	Latency  atomic.Int64
+	LOffset  atomic.Int64
 }
 
 // NewWebSocketConn creates a new WebSocketConn.
@@ -114,8 +117,6 @@ func NewServer(cfg *config.Config) *Server {
 // Start runs the WebSocket server.
 func (s *Server) Start() error {
 
-	
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	
@@ -146,7 +147,7 @@ func (s *Server) Start() error {
 			}
 
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("HTTP server ListenAndServe error: %v", err)
+				log.Fatalf("HTTP server ListenAndServe error: %v", err)
 			}
 		}(addr, server)
 	}
@@ -175,8 +176,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	connID := int(s.listenerCount.Add(1))
 	wsConn := NewWebSocketConn(connID, conn, s.cfg)
 	log.Printf("[Server] New WebSocket connection from %s (ID: %d)", conn.RemoteAddr(), connID)
+	
+	found:=false
+	for _, ws := range s.sessionManager.wsConns {
+		if ws == wsConn {
+			found= true
+			break
+		}
+	}
+	if !found {
+		s.sessionManager.wsConns= append(s.sessionManager.wsConns, wsConn)
+		log.Printf("[Server] Adding WebSocket %d to sessionManager, total %d WebSockets", connID, len(s.sessionManager.wsConns))
+	}
+	
 	defer func() {
-		log.Printf("[Server] WebSocket connection %d from %s closed.", connID, conn.RemoteAddr())
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] WebSocket %d from %s closed.", connID, conn.RemoteAddr())
+		}
 		wsConn.conn.Close()
 		wsConn.connected = false
 		s.sessionManager.CloseAllSessionsForWebSocket(wsConn)
@@ -187,18 +203,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // readWebSocketMessages reads and processes messages from a single WebSocket connection.
 func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
-	if s.cfg.LogDebug {
+	if s.cfg.LogDebug>=2 {
 		log.Printf("[Server] WebSocket %d Start readWebSocketMessages",wsConn.ID)
 	}
 	for {
 		select {
 		case <-s.ctx.Done():
+			if s.cfg.LogDebug>=2 {
+				log.Printf("[Server] WebSocket %d readWebSocketMessages ctx.Done. ",wsConn.ID)
+			}
 			return
 		default:
 			msg, err := wsConn.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					if s.cfg.LogDebug {
+					if s.cfg.LogDebug>=2 {
 						log.Printf("[Server] WebSocket %d closed normally: %v", wsConn.ID, err)
 					}
 				} else {
@@ -208,8 +227,8 @@ func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
 				return
 			}
 			
-			if s.cfg.LogDebug {
-				log.Printf("[Server] WebSocket %d DumpMessage \n MessageType: %d\n SessionID: %d\n SquenceID: %d\n PayloadLength: %d\n Payload: %v",wsConn.ID, msg.Type, msg.SessionID, msg.SequenceID, len(msg.Payload), msg.Payload)
+			if s.cfg.LogDebug>=3 {
+				log.Printf("[Server] WebSocket %d  MessageType: %d, SessionID: %d, SquenceID: %d, PayloadLength: %d",wsConn.ID, msg.Type, msg.SessionID, msg.SequenceID, len(msg.Payload))
 		    }
 
 			switch msg.Type {
@@ -217,19 +236,53 @@ func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
 				// Server now connects directly to the target address provided by the client.
 				// This makes the server truly general-purpose for proxying.
 				targetAddr := string(msg.Payload)
-				log.Printf("[Server] WS %d: Open session %d to client-requested target: %s", wsConn.ID, msg.SessionID, targetAddr)
-				s.handleOpenSession(wsConn, msg.SessionID, msg.SequenceID+1, targetAddr) // Use client-provided targetAddr
+				if s.cfg.LogDebug>=2 {
+					log.Printf("[Server] WebSocket %d: OPEN_SESSION received, Opening session %d to client-requested target: %s", wsConn.ID, msg.SessionID, targetAddr)
+				}
+				if s.handleOpenSession(wsConn, msg.SessionID, msg.SequenceID+1, targetAddr) { // Use client-provided targetAddr
+					//打开到目标的连接后，发送会话应答，消息与OPEN_SESSION相同（方向不同），后继会话的序列号从此开始递增
+					//如果应答发送失败，结束这个会话
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Server] WebSocket %d: Target %s session %d Opened, sending OPEN_SESSION_ACK ", wsConn.ID, targetAddr, msg.SessionID)
+					}
+					time.Sleep(100 * time.Millisecond)
+					if err := wsConn.WriteMessage(protocol.NewOpenSessionMessage(msg.SessionID, msg.SequenceID, targetAddr)); err != nil {
+						log.Printf("[Server] WebSocket %d: Reply OPEN_SESSION Message Failed, SessionID:%d, SequenceID:%d", wsConn.ID, msg.SessionID, msg.SequenceID)
+						if sess, ok := s.sessionManager.LoadSession(msg.SessionID); ok {
+							sess.Close()
+						}
+					} else {
+						if s.cfg.LogDebug>=2 {
+							log.Printf("[Server] WebSocket %d: session %d Opened,  OPEN_SESSION_ACK sent", wsConn.ID, msg.SessionID)
+						}
+					}
+				} else {
+					log.Printf("[Server] WebSocket %d: Open session Failed, sending CLOSE_SESSION", wsConn.ID)
+					time.Sleep(100 * time.Millisecond)
+					if err := wsConn.WriteMessage(protocol.NewCloseSessionMessage(msg.SessionID)); err != nil {
+						log.Printf("[Server] WebSocket %d: Open session %d Failed", wsConn.ID)
+					}
+					if sess, ok := s.sessionManager.LoadSession(msg.SessionID); !ok {
+						log.Printf("[Server] WebSocket %d: Session %d Store failed", wsConn.ID, msg.SessionID)
+						sess.Close()
+					}
+				}
+				
 				
 			case protocol.MsgTypeData:
 				if sess, ok := s.sessionManager.LoadSession(msg.SessionID); ok {
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Server] WebSocket %d: DataMessage in Session(%d) Seq(%d) received, saving to Buffer...", wsConn.ID, msg.SessionID, msg.SequenceID)
+					}
 					// 将消息放入会话的接收缓冲区
-					sess.rxmu.Lock()
+					sess.mu.Lock()
 					sess.receiveBuffer[msg.SequenceID] = msg
 					sess.bufferCond.Signal() // 通知等待中的消费者有新消息到达
-					sess.rxmu.Unlock()
-					val,ok:=sess.lastPing[wsConn]
-					if ok {
-						val.Store(time.Now().UnixNano())//保存上数据活动的时间
+					sess.mu.Unlock()
+					
+					wsConn.LastPing.Store(time.Now().UnixNano())
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Server] WebSocket %d: DataMessage saved to Session Buffer, bufferLen: %d, LastPing %dms stored", wsConn.ID, len(sess.receiveBuffer),wsConn.LastPing.Load()/1_000_000)
 					}
 					
 					//这里不直接转发，等待会话协程处理缓冲区
@@ -238,80 +291,86 @@ func (s *Server) readWebSocketMessages(wsConn *WebSocketConn) {
 						// sess.Close()
 					// }
 				} else {
-					if s.cfg.LogDebug {
-						log.Printf("[Server] WS %d: Received data for unknown session %d", wsConn.ID, msg.SessionID)
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Server] WebSocket %d: Received data for unknown session %d, clos", wsConn.ID, msg.SessionID)
 					}
 					wsConn.WriteMessage(protocol.NewCloseSessionMessage(msg.SessionID))
 				}
 			case protocol.MsgTypeCloseSession:
 				if sess, ok := s.sessionManager.LoadSession(msg.SessionID); ok {
-					if s.cfg.LogDebug {
-						log.Printf("[Server] WS %d: Received close for session %d from client.", wsConn.ID, msg.SessionID)
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Server] WebSocket %d: Received close for session %d from client.", wsConn.ID, msg.SessionID)
 					}
 					sess.Close()
 				} else {
-					log.Printf("[Server] WS %d: Received close for unknown session %d from client.", wsConn.ID, msg.SessionID)
+					log.Printf("[Server] WebSocket %d: Received close for unknown session %d from client.", wsConn.ID, msg.SessionID)
 				}
 			case protocol.MsgTypePing:
 				if timestamp, err := protocol.GetPingTimestamp(msg); err == nil {
-					if sess, ok := s.sessionManager.LoadSession(msg.SessionID); ok {
-				
-						val,ok:=sess.lastPing[wsConn]
-						if ok {
-							val.Store(time.Now().UnixNano())//保存上数据活动的时间
-						}
-						lastlatency, exists := sess.latency[wsConn]
-						if !exists {
-							lastlatency.Store(0)
-						}
-						latency:=((time.Now().UnixNano() - timestamp)*7+lastlatency.Load()*3)/10
-						val,ok=sess.latency[wsConn]
-						if ok {
-							val.Store(latency)//保存延时测量数据
-						}
-						if s.cfg.LogDebug {
-							log.Printf("[Server] WS %d: Received ping, latency: %d ms, sending pong.", wsConn.ID, latency/1_000_000)
-						}
+					wsConn.LastPing.Store(time.Now().UnixNano())
+					lastlatency:=wsConn.Latency.Load()
+					loffset:=wsConn.LOffset.Load()
+					if (time.Now().UnixNano() - timestamp + loffset)<0 {
+						loffset= timestamp -time.Now().UnixNano()
+						wsConn.LOffset.Store(loffset)
 					}
-					
-					wsConn.WriteMessage(protocol.NewPongMessage(timestamp))
+					latency:=((time.Now().UnixNano() - timestamp + loffset)*7+lastlatency*3)/10
+					wsConn.Latency.Store(latency)
+					if s.cfg.LogDebug>=3 {
+						log.Printf("[Server] WebSocket %d: Received ping, latency: %d ms (offset: %d), sending pong.", wsConn.ID, loffset, latency/1_000_000)
+					}					
+					wsConn.WriteMessage(protocol.NewPongMessage(timestamp))	
 				} else {
-					log.Printf("[Server] WS %d: Invalid ping message: %v", wsConn.ID, err)
+					log.Printf("[Server] WebSocket %d: Invalid ping message: %v", wsConn.ID, err)
 				}
 			default:
-				log.Printf("[Server] WS %d: Received unknown message type: %d", wsConn.ID, msg.Type)
+				log.Printf("[Server] WebSocket %d: Received unknown message type: %d", wsConn.ID, msg.Type)
 			}
 		}
+	}
+	if s.cfg.LogDebug>=2 {
+		log.Printf("[Server] WebSocket %d readWebSocketMessages end. ",wsConn.ID)
 	}
 }
 
 // handleOpenSession establishes a connection to the target host.
-func (s *Server) handleOpenSession(wsConn *WebSocketConn, sessionID , seqID uint64, targetAddr string) {
+func (s *Server) handleOpenSession(wsConn *WebSocketConn, sessionID , startSeqID uint64, targetAddr string) bool {
 	// Server now dials directly to the targetAddr provided by the client.
-	if s.cfg.LogDebug {
-		log.Printf("[Server] WS %d: handleOpenSession start ", wsConn.ID)
+	if s.cfg.LogDebug>=2 {
+		log.Printf("[Server] WebSocket %d: handleOpenSession start ", wsConn.ID)
 	}
 	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("[Server] [handleOpenSession] WS %d: Failed to connect to client-requested target %s for session %d: %v", wsConn.ID, targetAddr, sessionID, err)
+		log.Printf("[Server] [handleOpenSession] WebSocket %d: Failed to connect to client-requested target %s for session %d: %v", wsConn.ID, targetAddr, sessionID, err)
 		wsConn.WriteMessage(protocol.NewCloseSessionMessage(sessionID))
-		return
+		return false
 	}
 
-	if s.cfg.LogDebug {
-		log.Printf("[Server] [handleOpenSession] WS %d: Successfully connected to client-requested target %s for session %d.", wsConn.ID, targetAddr, sessionID)
+	if s.cfg.LogDebug>=2 {
+		log.Printf("[Server] [handleOpenSession] WebSocket %d: Successfully connected to client-requested target %s for session %d.", wsConn.ID, targetAddr, sessionID)
 	}
-	sess := NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn)
-	s.sessionManager.StoreSession(sessionID, sess)
+	log.Printf("[Server] WebSocket %d: Creating TargetSession.")
+	sess := NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn, s.cfg)
+	if sess!=nil {
+		sess.nextSequenceID=startSeqID
+		sess.sendSequenceID=startSeqID
+		s.sessionManager.StoreSession(sessionID, sess)
 	
-	if s.cfg.LogDebug {
-		log.Printf("[Server] WS %d: Target handling goroutine for session %d Started.", wsConn.ID, sessionID)
+		log.Printf("[Server] WebSocket %d: TargetSession %d Created",  sessionID, len(sess.manager.wsConns))
+	
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] WebSocket %d: Target handling goroutine for session %d Started.", wsConn.ID, sessionID)
+		}
+		go sess.StartMessage()
+		go sess.Start()
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] WebSocket %d: handleOpenSession end. ", wsConn.ID)
+		}
+		return true
+	} else {
+		log.Printf("[Server] WebSocket %d: TargetSession create Failed, handleOpenSession end. ", wsConn.ID)
+		return false
 	}
-	sess.nextSequenceID=seqID
-	sess.sendSequenceID=1
-	go sess.StartMessage()
-	go sess.Start()
-	
 }
 
 // Stop gracefully shuts down the server.

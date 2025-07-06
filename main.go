@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile) // Include file and line number in logs
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile) 
 
 	cfg := config.LoadConfig()
 

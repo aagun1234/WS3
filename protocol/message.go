@@ -41,7 +41,7 @@ func (tm *TunnelMessage) Marshal() ([]byte, error) {
 	header := make([]byte, HeaderSize)
 	header[0] = byte(tm.Type)
 	binary.BigEndian.PutUint64(header[1:9], tm.SessionID)
-	binary.BigEndian.PutUint64(header[10:18], tm.SequenceID)
+	binary.BigEndian.PutUint64(header[9:17], tm.SequenceID)
 	return append(header, tm.Payload...), nil
 }
 
@@ -53,17 +53,17 @@ func (tm *TunnelMessage) Unmarshal(data []byte) error {
 
 	tm.Type = MessageType(data[0])
 	tm.SessionID = binary.BigEndian.Uint64(data[1:9])
-	tm.SequenceID = binary.BigEndian.Uint64(data[10:18])
+	tm.SequenceID = binary.BigEndian.Uint64(data[9:17])
 	tm.Payload = data[HeaderSize:]
 	return nil
 }
 
 // NewOpenSessionMessage creates an OPEN_SESSION message.
-func NewOpenSessionMessage(sessionID uint64, targetAddr string) *TunnelMessage {
+func NewOpenSessionMessage(sessionID, seqID uint64, targetAddr string) *TunnelMessage {
 	return &TunnelMessage{
 		Type:      MsgTypeOpenSession,
 		SessionID: sessionID,
-		SequenceID: 1,
+		SequenceID: seqID,
 		Payload:   []byte(targetAddr),
 	}
 }

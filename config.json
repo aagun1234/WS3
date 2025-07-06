@@ -2,12 +2,12 @@
   "mode": "client",
   "client_proxy_mode": "tcp",
   "client_listen_addr": ":1080",
-  "remote_server_addr": "wss://192.168.199.211:8080/ws,wss://192.168.199.211:8081/ws,wss://192.168.199.211:8082/ws",
+  "remote_server_addr": "wss://192.168.199.211:8080/ws,wss://192.168.199.211:8081/ws",
   "forward_target": "127.0.0.1:7892",
   "secret_key": "abcdefghijklmnopqrstuvwxyz123456",
   "auth_token": "mysecretproxytoken",
   "tunnel_count": 4,
   "ping_interval": 30,
-  "log_debug": false,
+  "log_debug": 2,
   "insecure_skip_verify": true
 }

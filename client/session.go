@@ -9,6 +9,7 @@ import (
 	"time"
 	"math/rand"
 	"github.com/aagun1234/ws3/protocol"
+	"github.com/aagun1234/ws3/config"
 )
 
 // Session manages a single client connection and its corresponding stream over the tunnel.
@@ -22,24 +23,25 @@ type Session struct {
 	sessions   *sync.Map // Reference back to the manager's sessions map
 	closed     chan struct{}
 	once       sync.Once
-
-	rxmu             sync.RWMutex
+	cfg  *config.Config
+	
 	receiveBuffer  map[uint64]*protocol.TunnelMessage // 存储乱序到达的消息
 	bufferCond     *sync.Cond                // 用于通知等待新消息的消费者
 }
 
 // NewSession creates a new session.
-func NewSession(sessionID uint64, clientConn net.Conn, tunnels []*Tunnel, sessions *sync.Map) *Session {
+func NewSession(sessionID uint64, clientConn net.Conn, tunnels []*Tunnel, sessions *sync.Map, cfg *config.Config) *Session {
 	sess := &Session{
 		SessionID:  sessionID,
 		clientConn: clientConn,
 		tunnels:     tunnels,
 		sessions:   sessions,
 		closed:     make(chan struct{}),
+		cfg:	cfg,
 		receiveBuffer: make(map[uint64]*protocol.TunnelMessage),
 	}
 	sess.sendSequenceID=0
-	sess.bufferCond = sync.NewCond(&sess.rxmu) // 使用 session 的 RWMutex 作为 Cond 的 Locker
+	sess.bufferCond = sync.NewCond(&sess.mu) // 使用 session 的 RWMutex 作为 Cond 的 Locker
 	return sess
 }
 // GetAvailableTunnel selects a tunnel based on weighted random selection by latency.
@@ -101,16 +103,19 @@ func (s *Session) GetAvailableTunnel() *Tunnel {
 func (s *Session) StartMessage() { 
 	go func() {
 		for {
-			s.rxmu.Lock()
+			s.mu.Lock()
 			for { //循环等待直到有nextSequenceID
 				msg, exists := s.receiveBuffer[s.nextSequenceID]
 				if exists {
 					if msg.SessionID==s.SessionID {
 						// 找到了期待的消息，可以处理了
+						if s.cfg.LogDebug>=2 {
+							log.Printf("[SessionProcess] [Session %d] Got data From buffer", s.SessionID)
+						}
 						delete(s.receiveBuffer, s.nextSequenceID) // 从缓冲区中移除
 						s.nextSequenceID++                       // 更新期待的下一条序列号
-						s.rxmu.Unlock()
-
+						s.mu.Unlock()
+						
 						// 处理并转发消息
 						if _, err := s.clientConn.Write(msg.Payload); err != nil {
 							log.Printf("[SessionProcess] [Session %d] Error writing data to client connection: %v", s.SessionID, err)
@@ -138,6 +143,8 @@ func (s *Session) StartMessage() {
 			}
 		}
 	}()
+	// Keep this goroutine alive until session is closed (waits on s.closed)
+	<-s.closed
 }
 
 
@@ -171,18 +178,27 @@ func (s *Session) Start() {
 
 				if n > 0 {
 					// Send data over tunnel
+					if s.cfg.LogDebug>=2 {
+						log.Printf("[Session %d] Going to send %d bytes to server, tunnels: %d", s.SessionID, n, len(s.tunnels))
+					}
 					tunnel:=s.GetAvailableTunnel()
 					if tunnel!=nil {
-						log.Printf("[Session %d] select tunnel %d , Seq:%d", s.SessionID, tunnel.ID, s.sendSequenceID)
+						if s.cfg.LogDebug>=2 {
+							log.Printf("[Session %d] select tunnel %d , Seq:%d", s.SessionID, tunnel.ID, s.sendSequenceID)
+						}
 						if err := tunnel.WriteMessage(protocol.NewDataMessage(s.SessionID, s.sendSequenceID, buf[:n])); err != nil {
 							log.Printf("[Session %d] Error sending data over tunnel: %v", s.SessionID, err)
 							s.Close()
 							return
 						}
+						
 						s.sendSequenceID++
+						if s.cfg.LogDebug>=2 {
+							log.Printf("[Session %d] data sent, SendSeq++= %d", s.SessionID, s.sendSequenceID)
+						}
 					} else {
-						log.Printf("[Session %d] No available tunnel: %v", s.SessionID)
-							s.Close()
+						log.Printf("[Session %d] No available tunnel to send Message, Closing session", s.SessionID)
+						s.Close()
 						return
 					}
 				}
@@ -197,7 +213,9 @@ func (s *Session) Start() {
 // Close closes the session and cleans up resources.
 func (s *Session) Close() {
 	s.once.Do(func() {
-		log.Printf("[Session %d] Closing session.", s.SessionID)
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Session %d] Closing session.", s.SessionID)
+		}
 		close(s.closed)
 
 		// Remove from manager's map
