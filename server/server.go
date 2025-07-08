@@ -365,14 +365,19 @@ func (s *Server) handleOpenSession(wsConn *WebSocketConn, sessionID , startSeqID
 		}
 	} 
 	
-	log.Printf("[Server] WebSocket %d: Init TargetSession.", wsConn.ID )
+	if s.cfg.LogDebug>=2 {
+		log.Printf("[Server] WebSocket %d: Init TargetSession.", wsConn.ID )
+	}
 	sess = NewTargetSession(sessionID, uint64(s.cfg.PingInterval*3), wsConn, s.sessionManager, targetConn, s.cfg)
 	if sess!=nil {
 		sess.nextSequenceID=startSeqID
 		sess.sendSequenceID=startSeqID
 		s.sessionManager.StoreSession(sessionID, sess)
 	
-		log.Printf("[Server] WebSocket %d: TargetSession initialized, total %d websockets",  sessionID, len(sess.wsConns))
+		if s.cfg.LogDebug>=2 {
+			log.Printf("[Server] WebSocket %d: TargetSession initialized, total %d websockets",  sessionID, len(sess.wsConns))
+		
+		}
 	
 		if s.cfg.LogDebug>=2 {
 			log.Printf("[Server] WebSocket %d: Target handling goroutine for session %d Started.", wsConn.ID, sessionID)
